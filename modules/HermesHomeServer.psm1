@@ -245,10 +245,10 @@ terminal:
 quick_commands:
   bkp:
     type: exec
-    command: sh /opt/scripts/backup.sh
+    command: BACKUP_SKIP_SKILLS=1 sh /opt/scripts/backup.sh
   backup:
     type: exec
-    command: sh /opt/scripts/backup.sh
+    command: BACKUP_SKIP_SKILLS=1 sh /opt/scripts/backup.sh
   backups:
     type: exec
     command: sh /opt/scripts/list-backups.sh
@@ -267,6 +267,12 @@ quick_commands:
   sendbackup:
     type: exec
     command: sh /opt/scripts/send-backup.sh
+  wikistatus:
+    type: exec
+    command: sh /opt/scripts/wiki-status.sh
+  wikisearch:
+    type: exec
+    command: sh /opt/scripts/wiki-search.sh
 "@
 
     # запись в UTF-8 без BOM (П2), иначе YAML-парсер может споткнуться
@@ -292,12 +298,53 @@ function Ensure-HermesDataDirs {
         'data\sessions',
         'data\skills',
         'data\cron',
+        # LLM Wiki (Карпаты): дерево под data\wiki
+        'data\wiki',
+        'data\wiki\raw',
+        'data\wiki\pages',
+        'data\wiki\pages\entities',
+        'data\wiki\pages\concepts',
+        'data\wiki\pages\sources',
+        # skill wiki-llm (из templates/)
+        'data\skills\research\wiki-llm',
         'backups'
     )
     foreach ($dir in $dirs) {
         $path = Join-Path $root $dir
         if (-not (Test-Path $path)) {
             New-Item -ItemType Directory -Path $path -Force | Out-Null
+        }
+    }
+
+    # Шаблоны лежат рядом с modules/ (в git); data/ в .gitignore
+    # PSScriptRoot = .../modules → родитель = корень репо с templates/
+    # Важно: не через Get-HermesProjectRoot — в тестах он замокан на temp
+    $bundleRoot = Split-Path -Parent $PSScriptRoot
+    $tplWiki = Join-Path $bundleRoot 'templates\wiki'
+    $tplSkill = Join-Path $bundleRoot 'templates\skills\wiki-llm\SKILL.md'
+
+    # Копируем stub-файлы wiki только если целевого файла ещё нет
+    if (Test-Path -LiteralPath $tplWiki) {
+        $wikiPairs = @(
+            @{ Rel = 'SCHEMA.md'; Dest = 'data\wiki\SCHEMA.md' },
+            @{ Rel = 'index.md'; Dest = 'data\wiki\index.md' },
+            @{ Rel = 'log.md'; Dest = 'data\wiki\log.md' },
+            @{ Rel = 'pages\overview.md'; Dest = 'data\wiki\pages\overview.md' }
+        )
+        foreach ($pair in $wikiPairs) {
+            $src = Join-Path $tplWiki $pair.Rel
+            $dst = Join-Path $root $pair.Dest
+            if ((Test-Path -LiteralPath $src) -and -not (Test-Path -LiteralPath $dst)) {
+                Copy-Item -LiteralPath $src -Destination $dst -Force
+            }
+        }
+    }
+
+    # Skill wiki-llm → data/skills/research/wiki-llm/SKILL.md (если нет)
+    if (Test-Path -LiteralPath $tplSkill) {
+        $skillDst = Join-Path $root 'data\skills\research\wiki-llm\SKILL.md'
+        if (-not (Test-Path -LiteralPath $skillDst)) {
+            Copy-Item -LiteralPath $tplSkill -Destination $skillDst -Force
         }
     }
 }
@@ -365,6 +412,15 @@ function Get-HermesStatus {
     $memoryOk = Test-Path (Join-Path $root 'data\memories')
     $logsOk = Test-Path (Join-Path $root 'data\logs')
 
+    # статус wiki: Missing или OK + число .md
+    $wikiRoot = Join-Path $root 'data\wiki'
+    $wikiStatus = 'Missing'
+    if (Test-Path -LiteralPath $wikiRoot) {
+        # считаем markdown-файлы рекурсивно
+        $wikiMd = @(Get-ChildItem -LiteralPath $wikiRoot -Filter '*.md' -Recurse -File -ErrorAction SilentlyContinue)
+        $wikiStatus = "OK ($($wikiMd.Count) md)"
+    }
+
     $backupsDir = Join-Path $root 'backups'
     $backupCount = 0
     $lastBackup = 'Never'
@@ -405,6 +461,7 @@ function Get-HermesStatus {
         TelegramStatus   = $telegramStatus
         MemoryOk         = if ($memoryOk) { 'OK' } else { 'Missing' }
         LogsOk           = if ($logsOk) { 'OK' } else { 'Missing' }
+        WikiStatus       = $wikiStatus
         BackupCount      = $backupCount
         DiskFreeGb       = $diskFree
         RamFreeGb        = $ramFree
@@ -475,6 +532,8 @@ function New-HermesBackup {
     & $copyDataDir 'sessions' 'sessions'
     & $copyDataDir 'skills' 'skills'
     & $copyDataDir 'cron' 'cron'
+    # LLM Wiki — всегда в архив (как memory; не зависит от SKIP_SKILLS на хосте)
+    & $copyDataDir 'wiki' 'wiki'
 
     # config/ — .env, config.yaml, SOUL.md, state.db*, auth.json
     $configDest = Join-Path $tempDir 'config'
@@ -622,6 +681,8 @@ function Restore-HermesBackup {
     & $restoreDir 'sessions' 'sessions'
     & $restoreDir 'skills' 'skills'
     & $restoreDir 'cron' 'cron'
+    # LLM Wiki
+    & $restoreDir 'wiki' 'wiki'
 
     if (Test-Path (Join-Path $tempDir 'config\config.yaml')) {
         Copy-Item (Join-Path $tempDir 'config\config.yaml') (Join-Path $root 'data\config.yaml') -Force
@@ -693,7 +754,7 @@ function Ensure-TelegramBackupCommands {
     if (-not (Test-Path $dstDir)) {
         New-Item -ItemType Directory -Path $dstDir -Force | Out-Null
     }
-    foreach ($name in @('backup.sh', 'list-backups.sh', 'restore.sh', 'health.sh', 'send-backup.sh')) {
+    foreach ($name in @('backup.sh', 'list-backups.sh', 'restore.sh', 'health.sh', 'send-backup.sh', 'wiki-status.sh', 'wiki-search.sh')) {
         $srcFile = Join-Path $root "scripts\$name"
         if (Test-Path $srcFile) {
             Copy-Item $srcFile (Join-Path $dstDir $name) -Force
@@ -709,10 +770,10 @@ function Ensure-TelegramBackupCommands {
 quick_commands:
   bkp:
     type: exec
-    command: sh /opt/scripts/backup.sh
+    command: BACKUP_SKIP_SKILLS=1 sh /opt/scripts/backup.sh
   backup:
     type: exec
-    command: sh /opt/scripts/backup.sh
+    command: BACKUP_SKIP_SKILLS=1 sh /opt/scripts/backup.sh
   backups:
     type: exec
     command: sh /opt/scripts/list-backups.sh
@@ -731,6 +792,12 @@ quick_commands:
   sendbackup:
     type: exec
     command: sh /opt/scripts/send-backup.sh
+  wikistatus:
+    type: exec
+    command: sh /opt/scripts/wiki-status.sh
+  wikisearch:
+    type: exec
+    command: sh /opt/scripts/wiki-search.sh
 "@
         # дописываем блок; UTF-8 без BOM через чтение+Write-HermesTextFile
         $newLines = @(Get-Content $configPath) + ($block -split "`r?`n")
@@ -756,12 +823,18 @@ quick_commands:
   sendbackup:
     type: exec
     command: sh /opt/scripts/send-backup.sh
+  wikistatus:
+    type: exec
+    command: sh /opt/scripts/wiki-status.sh
+  wikisearch:
+    type: exec
+    command: sh /opt/scripts/wiki-search.sh
 "@
         $newLines = @(Get-Content $configPath) + ($block -split "`r?`n")
         Write-HermesTextFile -Path $configPath -Lines $newLines
     }
     else {
-        # Ф1/Ф3: дописываем health/sendbackup, если их ещё нет в живом конфиге
+        # Ф1/Ф3 + wiki: дописываем недостающие quick_commands
         $extra = @()
         if ($content -notmatch '(?m)^\s*health:') {
             $extra += '  health:'
@@ -773,6 +846,16 @@ quick_commands:
             $extra += '    type: exec'
             $extra += '    command: sh /opt/scripts/send-backup.sh'
         }
+        if ($content -notmatch '(?m)^\s*wikistatus:') {
+            $extra += '  wikistatus:'
+            $extra += '    type: exec'
+            $extra += '    command: sh /opt/scripts/wiki-status.sh'
+        }
+        if ($content -notmatch '(?m)^\s*wikisearch:') {
+            $extra += '  wikisearch:'
+            $extra += '    type: exec'
+            $extra += '    command: sh /opt/scripts/wiki-search.sh'
+        }
         if ($extra.Count -gt 0) {
             $newLines = @(Get-Content $configPath) + $extra
             Write-HermesTextFile -Path $configPath -Lines $newLines
@@ -780,7 +863,7 @@ quick_commands:
     }
 
     if (-not $Quiet) {
-        Write-HermesStep -Name 'Telegram backup' -Status 'OK' -Detail '/bkp /health /sendbackup'
+        Write-HermesStep -Name 'Telegram backup' -Status 'OK' -Detail '/bkp /health /sendbackup /wikistatus'
     }
 
     return $true

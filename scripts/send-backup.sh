@@ -12,9 +12,9 @@ if [ -z "$TOKEN" ] || [ -z "$CHAT_ID" ]; then
   exit 1
 fi
 
-# сначала создаём свежий бэкап (с шифрованием .env, если BACKUP_PASSWORD задан)
+# свежий бэкап для Telegram: без skills (лимит quick_commands 30s + bind-mount)
 echo "Creating backup..."
-OUT=$(sh /opt/scripts/backup.sh)
+OUT=$(BACKUP_SKIP_SKILLS=1 sh /opt/scripts/backup.sh)
 # последняя строка вывода backup.sh — имя файла
 NAME=$(echo "$OUT" | tail -n 1)
 ZIP="/opt/backups/$NAME"

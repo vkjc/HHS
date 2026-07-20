@@ -152,6 +152,9 @@ Describe 'HermesHomeServer module' {
             $raw | Should -Match 'health:'
             # команда sendbackup (Ф3)
             $raw | Should -Match 'sendbackup:'
+            # wiki quick commands
+            $raw | Should -Match 'wikistatus:'
+            $raw | Should -Match 'wikisearch:'
             # fallback OpenRouter (П1)
             $raw | Should -Match 'custom_providers:'
             # без BOM
@@ -229,7 +232,7 @@ Describe 'HermesHomeServer module' {
         # подготовка минимальных данных для архива
         BeforeEach {
             # подпапки data
-            foreach ($d in @('memories', 'logs', 'sessions', 'skills', 'cron')) {
+            foreach ($d in @('memories', 'logs', 'sessions', 'skills', 'cron', 'wiki')) {
                 # путь папки
                 $p = Join-Path $script:TestRoot "data\$d"
                 # создаём
@@ -263,6 +266,17 @@ Describe 'HermesHomeServer module' {
             Test-Path (Join-Path $extract 'cron\marker.txt') | Should -BeTrue
             # memory (переименовано из memories)
             Test-Path (Join-Path $extract 'memory\marker.txt') | Should -BeTrue
+        }
+
+        # wiki входит в backup round-trip
+        It 'кладёт wiki в zip (LLM Wiki)' {
+            # создаём бэкап
+            $zip = New-HermesBackup -Quiet
+            # распаковка
+            $extract = Join-Path $script:TestRoot 'extract-wiki'
+            Expand-Archive -Path $zip -DestinationPath $extract -Force
+            # маркер wiki на месте
+            Test-Path (Join-Path $extract 'wiki\marker.txt') | Should -BeTrue
         }
 
         # retention: оставляем только N архивов
@@ -385,6 +399,34 @@ Describe 'HermesHomeServer module' {
             # backups
             Test-Path (Join-Path $script:TestRoot 'backups') | Should -BeTrue
         }
+        It 'создаёт data/wiki подкаталоги' {
+            # вызываем
+            Ensure-HermesDataDirs
+            # wiki root
+            Test-Path (Join-Path $script:TestRoot 'data\wiki') | Should -BeTrue
+            # raw
+            Test-Path (Join-Path $script:TestRoot 'data\wiki\raw') | Should -BeTrue
+            # pages/entities
+            Test-Path (Join-Path $script:TestRoot 'data\wiki\pages\entities') | Should -BeTrue
+        }
+
+        It 'сеет wiki stubs и skill из templates/' {
+            # вызываем (шаблоны берутся из реального репо рядом с modules/)
+            Ensure-HermesDataDirs
+            # SCHEMA из templates/wiki
+            Test-Path (Join-Path $script:TestRoot 'data\wiki\SCHEMA.md') | Should -BeTrue
+            # index
+            Test-Path (Join-Path $script:TestRoot 'data\wiki\index.md') | Should -BeTrue
+            # overview
+            Test-Path (Join-Path $script:TestRoot 'data\wiki\pages\overview.md') | Should -BeTrue
+            # skill wiki-llm
+            Test-Path (Join-Path $script:TestRoot 'data\skills\research\wiki-llm\SKILL.md') | Should -BeTrue
+            # повторный вызов не затирает правки пользователя
+            $schema = Join-Path $script:TestRoot 'data\wiki\SCHEMA.md'
+            Set-Content -LiteralPath $schema -Value 'custom-schema' -Encoding UTF8
+            Ensure-HermesDataDirs
+            (Get-Content -LiteralPath $schema -Raw).Trim() | Should -Be 'custom-schema'
+        }
     }
 
     # --- Ф1/Ф3: дописывание quick_commands ---
@@ -395,7 +437,7 @@ Describe 'HermesHomeServer module' {
             $scripts = Join-Path $script:TestRoot 'scripts'
             New-Item -ItemType Directory -Path $scripts -Force | Out-Null
             # минимальные заглушки .sh
-            foreach ($n in @('backup.sh', 'list-backups.sh', 'restore.sh', 'health.sh', 'send-backup.sh')) {
+            foreach ($n in @('backup.sh', 'list-backups.sh', 'restore.sh', 'health.sh', 'send-backup.sh', 'wiki-status.sh', 'wiki-search.sh')) {
                 Set-Content -Path (Join-Path $scripts $n) -Value '#!/bin/sh' -Encoding ASCII
             }
         }
@@ -409,7 +451,7 @@ Describe 'HermesHomeServer module' {
                 'quick_commands:',
                 '  bkp:',
                 '    type: exec',
-                '    command: sh /opt/scripts/backup.sh',
+                '    command: BACKUP_SKIP_SKILLS=1 sh /opt/scripts/backup.sh',
                 '  restore1:',
                 '    type: exec',
                 '    command: sh /opt/scripts/restore.sh 1'
@@ -424,6 +466,9 @@ Describe 'HermesHomeServer module' {
             $raw | Should -Match '(?m)^\s*health:'
             # sendbackup появился
             $raw | Should -Match '(?m)^\s*sendbackup:'
+            # wiki commands
+            $raw | Should -Match '(?m)^\s*wikistatus:'
+            $raw | Should -Match '(?m)^\s*wikisearch:'
         }
     }
 

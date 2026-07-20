@@ -67,6 +67,11 @@ if [ -d "$TMP/cron" ]; then
   mkdir -p /opt/data/cron
   cp -a "$TMP/cron/." /opt/data/cron/ 2>/dev/null || true
 fi
+# LLM Wiki (Карпаты) — всегда восстанавливаем, если есть в архиве
+if [ -d "$TMP/wiki" ]; then
+  mkdir -p /opt/data/wiki
+  cp -a "$TMP/wiki/." /opt/data/wiki/ 2>/dev/null || true
+fi
 # основной конфиг Hermes
 if [ -f "$TMP/config/config.yaml" ]; then
   cp -f "$TMP/config/config.yaml" /opt/data/config.yaml

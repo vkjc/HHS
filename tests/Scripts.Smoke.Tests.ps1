@@ -41,7 +41,9 @@ Describe 'Scripts smoke' {
             'scripts\restore.sh',
             'scripts\list-backups.sh',
             'scripts\health.sh',
-            'scripts\send-backup.sh'
+            'scripts\send-backup.sh',
+            'scripts\wiki-status.sh',
+            'scripts\wiki-search.sh'
         )
         # каждый на месте
         It 'существует <_>' -ForEach $shScripts {
@@ -58,7 +60,9 @@ Describe 'Scripts smoke' {
             'restore.sh',
             'list-backups.sh',
             'health.sh',
-            'send-backup.sh'
+            'send-backup.sh',
+            'wiki-status.sh',
+            'wiki-search.sh'
         ) {
             # полный путь
             $path = Join-Path $script:Root ("scripts\" + $_)
@@ -94,6 +98,9 @@ Describe 'Scripts smoke' {
             $raw | Should -Match 'health:'
             # Ф3
             $raw | Should -Match 'sendbackup:'
+            # wiki
+            $raw | Should -Match 'wikistatus:'
+            $raw | Should -Match 'wikisearch:'
         }
     }
 
@@ -133,6 +140,18 @@ Describe 'Scripts smoke' {
             $path = Join-Path $script:Root 'scripts\send-backup.sh'
             $raw = Get-Content -LiteralPath $path -Raw
             $raw | Should -Match 'sendDocument'
+        }
+        It 'backup.sh включает wiki даже при SKIP_SKILLS' {
+            $path = Join-Path $script:Root 'scripts\backup.sh'
+            $raw = Get-Content -LiteralPath $path -Raw
+            $raw | Should -Match 'wiki'
+            $raw | Should -Match 'BACKUP_SKIP_SKILLS'
+        }
+        It 'wiki-status.sh печатает Wiki' {
+            $path = Join-Path $script:Root 'scripts\wiki-status.sh'
+            $raw = Get-Content -LiteralPath $path -Raw
+            $raw | Should -Match 'Wiki'
+            $raw | Should -Match '/opt/data/wiki'
         }
     }
 

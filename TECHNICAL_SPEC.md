@@ -41,7 +41,7 @@ Docker Desktop  (container: hermes-home)
 │  limits: 4G RAM / 2 CPU               │
 └───────────────────────────────────────┘
     │
-data/  memories, config, sessions, skills, cron, logs, SOUL.md
+data/  memories, config, sessions, skills, cron, logs, wiki, SOUL.md
 backups/  backup-YYYY-MM-DD-HHmmss.zip
 Task Scheduler: NightlyBackup 03:00 | Watchdog 15 min | ModelCheck Sun 04:00
 ```
@@ -68,13 +68,19 @@ hhs/   (корень проекта)
 │   ├── restore.sh
 │   ├── list-backups.sh
 │   ├── health.sh
-│   └── send-backup.sh
-├── data/                       # → /opt/data (persistent)
+│   ├── send-backup.sh
+│   ├── wiki-status.sh
+│   └── wiki-search.sh
+├── templates/                  # в git; data/ в .gitignore — сеются при install
+│   ├── wiki/                   # SCHEMA, index, log, pages/overview + .gitkeep
+│   └── skills/wiki-llm/SKILL.md
+├── data/                       # → /opt/data (persistent; не в git)
 │   ├── memories/
 │   ├── sessions/
 │   ├── skills/
 │   ├── cron/
 │   ├── logs/
+│   ├── wiki/                   # LLM Wiki (Карпаты)
 │   ├── config.yaml
 │   ├── SOUL.md
 │   ├── state.db*               # если есть у агента
@@ -133,6 +139,65 @@ hhs/   (корень проекта)
 | `/restore1` … `/restore3` | Восстановить N-й архив (**без** `.env`) |
 | `/health` | Статус gateway |
 | `/sendbackup` | Отправить последний zip в чат (лимит Telegram ~50 MB) |
+| `/wikistatus` | Статус LLM Wiki (число `.md`, размер, хвост `log.md`) |
+| `/wikisearch` | Usage (exec **не** передаёт args); поиск — NL или `wiki-search.sh` в контейнере |
+
+---
+
+## LLM Wiki (Карпаты) — P0/P1
+
+Персональная база знаний: LLM **компилирует** markdown-страницы (не классический RAG на каждый вопрос).
+Источник идеи: [gist karpathy/llm-wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f).
+
+### Структура
+
+```
+data/wiki/          → /opt/data/wiki
+  SCHEMA.md         # схема + пути
+  index.md          # каталог страниц
+  log.md            # журнал (append-only)
+  raw/              # IMMUTABLE источники
+  pages/            # mutable: overview, entities/, concepts/, sources/
+```
+
+### Слои памяти (не путать)
+
+| Слой | Роль |
+|------|------|
+| SOUL.md | Тон + правило «есть wiki» |
+| MEMORY.md / USER.md | Горячие факты + **указатели** на wiki |
+| session_search | «что говорили в чате» |
+| `data/wiki/` | Скомпилированное долгоживущее знание |
+| skill `wiki-llm` | Ingest / Query / Lint |
+
+Skill в runtime: `data/skills/research/wiki-llm/SKILL.md`.
+Канон в git: `templates/skills/wiki-llm/SKILL.md` + `templates/wiki/*`.
+`Ensure-HermesDataDirs` (вызывается из `install.ps1`) копирует шаблоны в `data/`, **только если файла ещё нет** (не затирает правки).
+Рядом в контейнере может быть bundled `llm-wiki` — общая справка.
+
+### UX
+
+- **Telegram NL:** «ingest: …», «что знаем про X?», «lint wiki» — через агента + skill.
+- **`/wikistatus`:** без LLM.
+- **`/wikisearch`:** показывает usage (Hermes `type: exec` не подставляет args). Поиск с запросом: `docker exec hermes-home sh /opt/scripts/wiki-search.sh QUERY` или NL.
+
+### Бэкап
+
+`wiki/` входит в zip **всегда**, в том числе при `BACKUP_SKIP_SKILLS=1` (`/bkp`). Host: `New-HermesBackup`; container: `backup.sh` / `restore.sh`.
+
+### Cron lint
+
+Еженедельный job через Hermes CLI (пример):
+
+```text
+hermes cron create "0 10 * * 0" --name wiki-lint --skill wiki-llm --deliver origin "Lint /opt/data/wiki per skill wiki-llm. Short report. Append log.md."
+```
+
+Либо настроить через агента в чате (`/cron`). См. также `data/wiki/SCHEMA.md`.
+
+### Status
+
+`.\status.ps1` / `Get-HermesStatus`: строка `Wiki` = `OK (N md)` или `Missing`.
 
 ---
 
@@ -141,6 +206,7 @@ hhs/   (корень проекта)
 ### Что входит в zip
 
 - `memory/` ← `data/memories`
+- `wiki/` ← `data/wiki` (**всегда**, даже при `BACKUP_SKIP_SKILLS`)
 - `logs/`
 - `sessions/`, `skills/`, `cron/`
 - `config/config.yaml`, `config/SOUL.md`
