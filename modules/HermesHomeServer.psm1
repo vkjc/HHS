@@ -73,6 +73,18 @@ function Ensure-Docker {
     return $true
 }
 
+function Write-HermesTextFile {
+    param(
+        [string]$Path,      # куда писать файл
+        [string[]]$Lines    # строки содержимого
+    )
+    # ФИКС (П2): Set-Content -Encoding UTF8 в PowerShell 5.1 пишет BOM,
+    # из-за чего docker compose и YAML-парсер могут не прочитать файл.
+    # Пишем UTF-8 строго БЕЗ BOM через .NET.
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllLines($Path, $Lines, $utf8NoBom)
+}
+
 function Get-HermesEnv {
     # Читает .env как hashtable
     $root = Get-HermesProjectRoot
@@ -121,7 +133,8 @@ function Set-HermesEnv {
         $lines += "$($pair.Key)=$($pair.Value)"
     }
 
-    Set-Content -Path $envPath -Value $lines -Encoding UTF8
+    # запись в UTF-8 без BOM (П2), иначе docker compose может не увидеть первый ключ
+    Write-HermesTextFile -Path $envPath -Lines $lines
 }
 
 function Get-DefaultModelForProvider {
@@ -170,10 +183,43 @@ function New-HermesConfig {
     # Создаёт config.yaml для Hermes без интерактивного мастера
     $root = Get-HermesProjectRoot
     $configPath = Join-Path $root 'data\config.yaml'
+
+    # ФИКС (П1): если config.yaml уже существует — НЕ трогаем его.
+    # Иначе install.ps1 -Force затирал бы рабочий конфиг
+    # (fallback-цепочку моделей, quick-команды и т.д.).
+    if (Test-Path $configPath) {
+        Write-Host 'config.yaml уже существует — оставляем как есть.'
+        return
+    }
+
     $baseUrl = $ProviderUrl.TrimEnd('/')
     if (-not $baseUrl.EndsWith('/v1')) {
         if ($baseUrl -match '/v1/?$') { $baseUrl = $baseUrl.TrimEnd('/') }
         else { $baseUrl = "$baseUrl/v1" }
+    }
+
+    # ФИКС (П1): для OpenRouter добавляем блок custom_providers с цепочкой
+    # бесплатных моделей — OpenRouter сам переключится на следующую при сбое.
+    $fallbackBlock = ''
+    if ($baseUrl -match 'openrouter') {
+        # для OpenRouter основной моделью ставим первую из бесплатной цепочки
+        $Model = 'nvidia/nemotron-3-super-120b-a12b:free'
+        $fallbackBlock = @"
+
+# Дополнительные параметры запроса к OpenRouter
+custom_providers:
+  # запись сопоставляется с моделью выше по одинаковому base_url
+  - name: openrouter-free
+    base_url: $baseUrl
+    # extra_body добавляется в тело каждого запроса chat/completions
+    extra_body:
+      # OpenRouter сам переключится на следующую модель из списка
+      # при ошибке основной (лимит 429, даунтайм, модерация)
+      models:
+        - nvidia/nemotron-3-super-120b-a12b:free
+        - openai/gpt-oss-20b:free
+        - google/gemma-4-31b-it:free
+"@
     }
 
     $yaml = @"
@@ -181,7 +227,7 @@ model:
   provider: custom
   default: $Model
   base_url: $baseUrl
-
+$fallbackBlock
 gateway:
   platforms:
     telegram:
@@ -215,9 +261,16 @@ quick_commands:
   restore3:
     type: exec
     command: sh /opt/scripts/restore.sh 3
+  health:
+    type: exec
+    command: sh /opt/scripts/health.sh
+  sendbackup:
+    type: exec
+    command: sh /opt/scripts/send-backup.sh
 "@
 
-    Set-Content -Path $configPath -Value $yaml -Encoding UTF8
+    # запись в UTF-8 без BOM (П2), иначе YAML-парсер может споткнуться
+    Write-HermesTextFile -Path $configPath -Lines ($yaml -split "`r?`n")
 }
 
 function Test-HermesConfigured {
@@ -340,40 +393,69 @@ function Get-HermesStatus {
     }
 }
 
+function Send-TelegramMessage {
+    param([string]$Text)   # текст сообщения для владельца сервера
+
+    # П3: отправляет сообщение владельцу через Telegram Bot API.
+    # Токен и ID пользователя берём из .env (Get-HermesEnv).
+    # Возвращает $true при успехе, $false при любой ошибке —
+    # уведомление не должно ронять основной скрипт.
+    try {
+        $env = Get-HermesEnv                                        # читаем .env как hashtable
+        $token = $env['TELEGRAM_BOT_TOKEN']                         # токен бота
+        $chatId = ($env['TELEGRAM_ALLOWED_USERS'] -split ',')[0]    # первый разрешённый пользователь = владелец
+        if (-not $token -or -not $chatId) { return $false }         # без токена/ID отправлять некуда
+        $uri = "https://api.telegram.org/bot$token/sendMessage"     # адрес метода Bot API
+        $body = @{ chat_id = $chatId.Trim(); text = $Text }         # параметры запроса
+        Invoke-RestMethod -Uri $uri -Method Post -Body $body -TimeoutSec 15 | Out-Null
+        return $true
+    }
+    catch {
+        # ошибка сети/токена — просто сообщаем в консоль, не прерываем работу
+        Write-Host "Telegram notification failed: $_"
+        return $false
+    }
+}
+
 function New-HermesBackup {
     param([switch]$Quiet)
 
-    # Creates backup-YYYY-MM-DD-HHmmss.zip with memory, config, logs
-    $root = Get-HermesProjectRoot
-    $timestamp = Get-Date -Format 'yyyy-MM-dd-HHmmss'
-    $backupDir = Join-Path $root 'backups'
-    $zipPath = Join-Path $backupDir "backup-$timestamp.zip"
+    # Создаёт backup-YYYY-MM-DD-HHmmss.zip (память, конфиг, логи, sessions/skills/cron)
+    $root = Get-HermesProjectRoot                                    # корень проекта
+    $timestamp = Get-Date -Format 'yyyy-MM-dd-HHmmss'               # метка времени для имени
+    $backupDir = Join-Path $root 'backups'                          # папка архивов
+    $zipPath = Join-Path $backupDir "backup-$timestamp.zip"         # путь к новому zip
 
+    # создаём папку backups, если её ещё нет
     if (-not (Test-Path $backupDir)) {
         New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
     }
 
+    # временный каталог для сборки содержимого
     $tempDir = Join-Path $env:TEMP "hermes-backup-$timestamp"
     if (Test-Path $tempDir) { Remove-Item $tempDir -Recurse -Force }
     New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
 
-    # memory/
-    $memoryDest = Join-Path $tempDir 'memory'
-    New-Item -ItemType Directory -Path $memoryDest -Force | Out-Null
-    $memorySrc = Join-Path $root 'data\memories'
-    if (Test-Path $memorySrc) {
-        Copy-Item -Path (Join-Path $memorySrc '*') -Destination $memoryDest -Recurse -Force -ErrorAction SilentlyContinue
+    # вспомогательная: копирует папку data\X -> temp\Y
+    $copyDataDir = {
+        param([string]$SrcName, [string]$DestName)
+        $dest = Join-Path $tempDir $DestName                        # куда класть
+        New-Item -ItemType Directory -Path $dest -Force | Out-Null  # создаём папку
+        $src = Join-Path $root "data\$SrcName"                      # откуда брать
+        if (Test-Path $src) {
+            Copy-Item -Path (Join-Path $src '*') -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 
-    # logs/
-    $logsDest = Join-Path $tempDir 'logs'
-    New-Item -ItemType Directory -Path $logsDest -Force | Out-Null
-    $logsSrc = Join-Path $root 'data\logs'
-    if (Test-Path $logsSrc) {
-        Copy-Item -Path (Join-Path $logsSrc '*') -Destination $logsDest -Recurse -Force -ErrorAction SilentlyContinue
-    }
+    # memory / logs
+    & $copyDataDir 'memories' 'memory'
+    & $copyDataDir 'logs' 'logs'
+    # П6: диалоги, навыки, задания cron
+    & $copyDataDir 'sessions' 'sessions'
+    & $copyDataDir 'skills' 'skills'
+    & $copyDataDir 'cron' 'cron'
 
-    # config/ — только .env, config.yaml, SOUL.md
+    # config/ — .env, config.yaml, SOUL.md
     $configDest = Join-Path $tempDir 'config'
     New-Item -ItemType Directory -Path $configDest -Force | Out-Null
     foreach ($file in @(
@@ -386,17 +468,47 @@ function New-HermesBackup {
         }
     }
 
+    # читаем .env для retention / password / mirror
+    $envMap = Get-HermesEnv
+
+    # П12: если задан BACKUP_PASSWORD и есть openssl — шифруем .env
+    $plainEnv = Join-Path $configDest '.env'
+    $encEnv = Join-Path $configDest '.env.enc'
+    $backupPassword = $envMap['BACKUP_PASSWORD']
+    if ($backupPassword -and (Test-Path $plainEnv)) {
+        $openssl = Get-Command openssl -ErrorAction SilentlyContinue
+        if ($openssl) {
+            # openssl AES-256-CBC + PBKDF2 (как в backup.sh)
+            & openssl enc -aes-256-cbc -salt -pbkdf2 -in $plainEnv -out $encEnv -pass "pass:$backupPassword" 2>$null
+            if (Test-Path $encEnv) {
+                Remove-Item $plainEnv -Force                      # открытый .env в архив не кладём
+            }
+        }
+        else {
+            Write-Host 'BACKUP_PASSWORD задан, но openssl не найден — .env останется открытым в архиве.'
+        }
+    }
+
+    # упаковываем zip
     if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
     Compress-Archive -Path (Join-Path $tempDir '*') -DestinationPath $zipPath -Force
     Remove-Item $tempDir -Recurse -Force
 
-    # Ротация: хранить последние N копий
-    $env = Get-HermesEnv
+    # ротация: хранить последние N копий
     $retention = 30
-    if ($env['BACKUP_RETENTION'] -match '^\d+$') { $retention = [int]$env['BACKUP_RETENTION'] }
+    if ($envMap['BACKUP_RETENTION'] -match '^\d+$') { $retention = [int]$envMap['BACKUP_RETENTION'] }
     $allBackups = Get-ChildItem $backupDir -Filter 'backup-*.zip' | Sort-Object Name -Descending
     if ($allBackups.Count -gt $retention) {
         $allBackups | Select-Object -Skip $retention | Remove-Item -Force
+    }
+
+    # Ф4: зеркало архива на другой диск / OneDrive
+    $mirror = $envMap['BACKUP_MIRROR_DIR']
+    if ($mirror) {
+        if (-not (Test-Path $mirror)) {
+            New-Item -ItemType Directory -Path $mirror -Force | Out-Null
+        }
+        Copy-Item $zipPath (Join-Path $mirror (Split-Path $zipPath -Leaf)) -Force
     }
 
     if (-not $Quiet) { Write-HermesStep -Name 'Backup' -Status 'OK' -Detail $zipPath }
@@ -421,11 +533,26 @@ function Restore-HermesBackup {
         throw "Invalid backup number: $Index"
     }
 
+    # запоминаем путь ДО safety-бэкапа (иначе номер 1 сдвинется на новый архив)
     $zip = $backups[$Index - 1].FullName
+
+    # П4: страховочный бэкап текущего состояния ДО восстановления
+    Write-Host 'Safety backup before restore...'
+    try {
+        New-HermesBackup -Quiet | Out-Null
+    }
+    catch {
+        Write-Host "Warning: safety backup failed: $_"
+    }
+
+    if (-not (Test-Path $zip)) {
+        throw "Backup file disappeared: $zip"
+    }
+
     $tempDir = Join-Path $env:TEMP "hermes-restore-$(Get-Random)"
     Expand-Archive -Path $zip -DestinationPath $tempDir -Force
 
-    # Остановить контейнер перед восстановлением
+    # остановить контейнер перед восстановлением
     Push-Location $root
     $prevEap = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
@@ -434,24 +561,55 @@ function Restore-HermesBackup {
     if ($LASTEXITCODE -ne 0) { Pop-Location; throw 'docker compose stop failed.' }
     Pop-Location
 
-    if (Test-Path (Join-Path $tempDir 'memory')) {
-        Copy-Item (Join-Path $tempDir 'memory\*') (Join-Path $root 'data\memories') -Recurse -Force
+    # вспомогательная: копирует temp\X\* -> data\Y
+    $restoreDir = {
+        param([string]$SrcName, [string]$DestName)
+        $src = Join-Path $tempDir $SrcName
+        if (Test-Path $src) {
+            $dest = Join-Path $root "data\$DestName"
+            if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
+            Copy-Item (Join-Path $src '*') $dest -Recurse -Force
+        }
     }
-    if (Test-Path (Join-Path $tempDir 'logs')) {
-        Copy-Item (Join-Path $tempDir 'logs\*') (Join-Path $root 'data\logs') -Recurse -Force
-    }
+
+    & $restoreDir 'memory' 'memories'
+    & $restoreDir 'logs' 'logs'
+    # П6: sessions / skills / cron
+    & $restoreDir 'sessions' 'sessions'
+    & $restoreDir 'skills' 'skills'
+    & $restoreDir 'cron' 'cron'
+
     if (Test-Path (Join-Path $tempDir 'config\config.yaml')) {
         Copy-Item (Join-Path $tempDir 'config\config.yaml') (Join-Path $root 'data\config.yaml') -Force
     }
-    # ФИКС: восстанавливаем .env только если в бэкапе он полный (содержит бот-токен).
-    # Иначе старый неполный .env из контейнера затёр бы рабочие секреты.
-    $envBackup = Join-Path $tempDir 'config\.env'                      # путь к .env внутри распакованного бэкапа
-    if (Test-Path $envBackup) {                                        # если .env в бэкапе вообще есть
-        $envText = Get-Content $envBackup -Raw                         # читаем его содержимое целиком
-        if ($envText -match '(?m)^TELEGRAM_BOT_TOKEN=.+') {            # проверяем: токен заполнен (не пустой)
-            Copy-Item $envBackup (Join-Path $root '.env') -Force       # полный файл — можно восстанавливать
+    if (Test-Path (Join-Path $tempDir 'config\SOUL.md')) {
+        Copy-Item (Join-Path $tempDir 'config\SOUL.md') (Join-Path $root 'data\SOUL.md') -Force
+    }
+
+    # текущий пароль шифрования (из живого .env, до перезаписи)
+    $currentEnv = Get-HermesEnv
+    $backupPassword = $currentEnv['BACKUP_PASSWORD']
+
+    # П12: если в архиве .env.enc — расшифровываем openssl
+    $encBackup = Join-Path $tempDir 'config\.env.enc'
+    $envBackup = Join-Path $tempDir 'config\.env'
+    if ((Test-Path $encBackup) -and $backupPassword) {
+        $openssl = Get-Command openssl -ErrorAction SilentlyContinue
+        if ($openssl) {
+            & openssl enc -d -aes-256-cbc -pbkdf2 -in $encBackup -out $envBackup -pass "pass:$backupPassword" 2>$null
         }
-        else {                                                         # токена нет — файл неполный
+        else {
+            Write-Host 'Skip .env.enc: openssl не найден, секретный .env не восстановлен.'
+        }
+    }
+
+    # восстанавливаем .env только если он полный (есть бот-токен)
+    if (Test-Path $envBackup) {
+        $envText = Get-Content $envBackup -Raw
+        if ($envText -match '(?m)^TELEGRAM_BOT_TOKEN=.+') {
+            Copy-Item $envBackup (Join-Path $root '.env') -Force
+        }
+        else {
             Write-Host 'Skip .env restore: backup has no secrets (keeping current .env).'
         }
     }
@@ -472,7 +630,7 @@ function Ensure-TelegramBackupCommands {
     if (-not (Test-Path $dstDir)) {
         New-Item -ItemType Directory -Path $dstDir -Force | Out-Null
     }
-    foreach ($name in @('backup.sh', 'list-backups.sh', 'restore.sh')) {
+    foreach ($name in @('backup.sh', 'list-backups.sh', 'restore.sh', 'health.sh', 'send-backup.sh')) {
         $srcFile = Join-Path $root "scripts\$name"
         if (Test-Path $srcFile) {
             Copy-Item $srcFile (Join-Path $dstDir $name) -Force
@@ -504,8 +662,16 @@ quick_commands:
   restore3:
     type: exec
     command: sh /opt/scripts/restore.sh 3
+  health:
+    type: exec
+    command: sh /opt/scripts/health.sh
+  sendbackup:
+    type: exec
+    command: sh /opt/scripts/send-backup.sh
 "@
-        Add-Content -Path $configPath -Value $block -Encoding UTF8
+        # дописываем блок; UTF-8 без BOM через чтение+Write-HermesTextFile
+        $newLines = @(Get-Content $configPath) + ($block -split "`r?`n")
+        Write-HermesTextFile -Path $configPath -Lines $newLines
     }
     elseif ($content -notmatch 'restore1:') {
         $block = @"
@@ -521,12 +687,37 @@ quick_commands:
   restore3:
     type: exec
     command: sh /opt/scripts/restore.sh 3
+  health:
+    type: exec
+    command: sh /opt/scripts/health.sh
+  sendbackup:
+    type: exec
+    command: sh /opt/scripts/send-backup.sh
 "@
-        Add-Content -Path $configPath -Value $block -Encoding UTF8
+        $newLines = @(Get-Content $configPath) + ($block -split "`r?`n")
+        Write-HermesTextFile -Path $configPath -Lines $newLines
+    }
+    else {
+        # Ф1/Ф3: дописываем health/sendbackup, если их ещё нет в живом конфиге
+        $extra = @()
+        if ($content -notmatch '(?m)^\s*health:') {
+            $extra += '  health:'
+            $extra += '    type: exec'
+            $extra += '    command: sh /opt/scripts/health.sh'
+        }
+        if ($content -notmatch '(?m)^\s*sendbackup:') {
+            $extra += '  sendbackup:'
+            $extra += '    type: exec'
+            $extra += '    command: sh /opt/scripts/send-backup.sh'
+        }
+        if ($extra.Count -gt 0) {
+            $newLines = @(Get-Content $configPath) + $extra
+            Write-HermesTextFile -Path $configPath -Lines $newLines
+        }
     }
 
     if (-not $Quiet) {
-        Write-HermesStep -Name 'Telegram backup' -Status 'OK' -Detail '/bkp /backups /restore1'
+        Write-HermesStep -Name 'Telegram backup' -Status 'OK' -Detail '/bkp /health /sendbackup'
     }
 
     return $true
@@ -556,6 +747,37 @@ function Ensure-BackupSchedule {
 
 function Remove-BackupSchedule {
     $taskName = 'HermesHomeServer-NightlyBackup'
+    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+}
+
+function Ensure-WatchdogSchedule {
+    param([switch]$Quiet)
+
+    # П8: задача Windows «каждые 15 минут» — watchdog.ps1
+    $root = Get-HermesProjectRoot
+    $taskName = 'HermesHomeServer-Watchdog'
+    $scriptPath = Join-Path $root 'watchdog.ps1'
+
+    # действие: powershell -File watchdog.ps1
+    $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`""
+    # триггер: каждые 15 минут (RepetitionDuration ~10 лет — MaxValue на части Windows ломается)
+    $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 15) -RepetitionDuration (New-TimeSpan -Days 3650)
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+
+    # пересоздаём задачу, если уже была
+    $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    if ($existing) {
+        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+    }
+
+    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Description 'Hermes Home Server watchdog (15 min)' | Out-Null
+
+    if (-not $Quiet) { Write-HermesStep -Name 'Watchdog' -Status 'OK' -Detail 'every 15 min' }
+}
+
+function Remove-WatchdogSchedule {
+    # снимаем задачу watchdog при uninstall
+    $taskName = 'HermesHomeServer-Watchdog'
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
 }
 
@@ -650,6 +872,7 @@ function Uninstall-HermesHome {
 
     $root = Get-HermesProjectRoot
     Remove-BackupSchedule
+    Remove-WatchdogSchedule
 
     Push-Location $root
     docker compose down -v 2>&1 | Out-Null

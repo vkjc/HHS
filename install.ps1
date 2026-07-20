@@ -72,6 +72,7 @@ Ensure-Docker
 Ensure-HermesDataDirs
 Ensure-Hermes
 Ensure-BackupSchedule
+Ensure-WatchdogSchedule
 Ensure-TelegramBackupCommands
 
 # Keep running when laptop lid is closed
