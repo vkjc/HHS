@@ -14,17 +14,26 @@ Write-Host 'Hermes Home Server - Install'
 Write-Host '============================'
 Write-Host ''
 
+# флаги «уже настроено»
 $alreadyConfigured = Test-HermesConfigured
 $dockerOk = Test-DockerRunning
 $hermesOk = Test-HermesHealthy
 $telegramOk = Test-TelegramConfigured
+# задача ночного бэкапа
 $backupTask = Get-ScheduledTask -TaskName 'HermesHomeServer-NightlyBackup' -ErrorAction SilentlyContinue
+# P1: задача watchdog каждые 15 мин
+$watchdogTask = Get-ScheduledTask -TaskName 'HermesHomeServer-Watchdog' -ErrorAction SilentlyContinue
+# P1: еженедельная проверка моделей
+$modelCheckTask = Get-ScheduledTask -TaskName 'HermesHomeServer-ModelCheck' -ErrorAction SilentlyContinue
 
-if ($alreadyConfigured -and $dockerOk -and $hermesOk -and $telegramOk -and $backupTask -and -not $Force) {
+# Nothing to do — только если всё на месте, включая watchdog и ModelCheck
+if ($alreadyConfigured -and $dockerOk -and $hermesOk -and $telegramOk -and $backupTask -and $watchdogTask -and $modelCheckTask -and -not $Force) {
     Write-HermesStep -Name 'Docker' -Status 'OK'
     Write-HermesStep -Name 'Hermes' -Status 'OK'
     Write-HermesStep -Name 'Telegram' -Status 'OK'
     Write-HermesStep -Name 'Backup' -Status 'OK'
+    Write-HermesStep -Name 'Watchdog' -Status 'OK'
+    Write-HermesStep -Name 'ModelCheck' -Status 'OK'
     Write-Host ''
     Write-Host 'Nothing to do.'
     exit 0
@@ -72,7 +81,10 @@ Ensure-Docker
 Ensure-HermesDataDirs
 Ensure-Hermes
 Ensure-BackupSchedule
+# P1: watchdog при необходимости (пересоздаёт задачу)
 Ensure-WatchdogSchedule
+# P1: еженедельная проверка :free моделей
+Ensure-ModelCheckSchedule
 Ensure-TelegramBackupCommands
 
 # Keep running when laptop lid is closed

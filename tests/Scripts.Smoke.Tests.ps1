@@ -150,5 +150,21 @@ Describe 'Scripts smoke' {
         It 'экспортирует Ensure-WatchdogSchedule' {
             Get-Command Ensure-WatchdogSchedule -Module HermesHomeServer | Should -Not -BeNullOrEmpty
         }
+        It 'экспортирует Ensure-ModelCheckSchedule' {
+            Get-Command Ensure-ModelCheckSchedule -Module HermesHomeServer | Should -Not -BeNullOrEmpty
+        }
+        It 'backup.sh использует pass file: и state.db' {
+            $path = Join-Path $script:Root 'scripts\backup.sh'
+            $raw = Get-Content -LiteralPath $path -Raw
+            $raw | Should -Match 'file:\$PASSFILE'
+            $raw | Should -Match 'state\.db'
+            $raw | Should -Match 'BACKUP_MIRROR_DIR'
+        }
+        It 'restore.sh предупреждает про .env' {
+            $path = Join-Path $script:Root 'scripts\restore.sh'
+            $raw = Get-Content -LiteralPath $path -Raw
+            $raw | Should -Match 'restore\.ps1'
+            $raw | Should -Match 'secrets are NOT restored'
+        }
     }
 }

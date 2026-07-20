@@ -11,7 +11,7 @@ if ($backups.Count -eq 0) {
 }
 
 Write-Host ''
-Write-Host 'Available backups:'
+Write-Host 'Available backups (1 = newest):'
 Write-Host ''
 for ($i = 0; $i -lt $backups.Count; $i++) {
     $name = $backups[$i].BaseName

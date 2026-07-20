@@ -75,10 +75,18 @@ fi
 if [ -f "$TMP/config/SOUL.md" ]; then
   cp -f "$TMP/config/SOUL.md" /opt/data/SOUL.md
 fi
+# P1: state.db* и auth.json
+for f in state.db state.db-wal state.db-shm auth.json; do
+  if [ -f "$TMP/config/$f" ]; then
+    cp -f "$TMP/config/$f" "/opt/data/$f" 2>/dev/null || true
+  fi
+done
 
-# П7: НЕ пишем .env в /opt/data/.env —
+# П7 / P0: НЕ пишем .env в /opt/data/.env —
 # секреты в контейнер приходят только через env_file с хоста.
 # Расшифровка .env.enc / восстановление корневого .env — задача restore.ps1 на хосте.
+echo "NOTE: .env / secrets are NOT restored by this Telegram/container path."
+echo "NOTE: To restore secrets (.env / .env.enc) run restore.ps1 on the Windows host."
 
 # чистим временную папку
 rm -rf "$TMP"

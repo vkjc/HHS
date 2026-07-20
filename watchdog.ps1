@@ -9,6 +9,8 @@ Import-Module (Join-Path $PSScriptRoot 'modules\HermesHomeServer.psm1') -Force
 $logDir = Join-Path $PSScriptRoot 'data\logs'
 # файл лога watchdog
 $logFile = Join-Path $logDir 'watchdog.log'
+# P1: маркер debounce для disk-алерта (не чаще 1 раза в 6 часов)
+$diskAlertMarker = Join-Path $logDir 'disk-alert.last'
 # создаём папку логов при необходимости
 if (-not (Test-Path $logDir)) {
     New-Item -ItemType Directory -Path $logDir -Force | Out-Null
@@ -60,7 +62,7 @@ try {
         Write-WatchLog 'Hermes OK'
     }
 
-    # Ф9: алерт, если на системном диске меньше 10 ГБ свободно
+    # Ф9: алерт, если на диске проекта меньше 10 ГБ свободно
     $drive = (Get-Item $PSScriptRoot).PSDrive.Name
     if (-not $drive) { $drive = 'C' }
     $disk = Get-PSDrive -Name $drive -ErrorAction SilentlyContinue
@@ -68,8 +70,27 @@ try {
         $freeGb = [math]::Round($disk.Free / 1GB, 1)
         if ($freeGb -lt 10) {
             Write-WatchLog ("Low disk: {0} GB free on {1}:" -f $freeGb, $drive)
-            $msg = 'Hermes: мало места на диске ' + $drive + ': - свободно ' + $freeGb + ' ГБ (порог 10 ГБ).'
-            Send-TelegramMessage -Text $msg | Out-Null
+            # P1: debounce — не чаще одного раза в 6 часов
+            $sendAlert = $true
+            if (Test-Path -LiteralPath $diskAlertMarker) {
+                try {
+                    $last = Get-Item -LiteralPath $diskAlertMarker
+                    $age = (Get-Date) - $last.LastWriteTime
+                    if ($age.TotalHours -lt 6) {
+                        $sendAlert = $false
+                        Write-WatchLog 'Disk alert skipped (debounce 6h)'
+                    }
+                }
+                catch {
+                    $sendAlert = $true
+                }
+            }
+            if ($sendAlert) {
+                $msg = 'Hermes: мало места на диске ' + $drive + ': - свободно ' + $freeGb + ' ГБ (порог 10 ГБ).'
+                Send-TelegramMessage -Text $msg | Out-Null
+                # обновляем маркер времени последней отправки
+                Set-Content -Path $diskAlertMarker -Value $now -Encoding ASCII
+            }
         }
     }
 }

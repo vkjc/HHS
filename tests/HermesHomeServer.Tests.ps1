@@ -321,6 +321,54 @@ Describe 'HermesHomeServer module' {
             # открытого .env в архиве быть не должно
             Test-Path (Join-Path $extract 'config\.env') | Should -BeFalse
         }
+
+        # P1: state.db и auth.json попадают в архив
+        It 'кладёт state.db и auth.json в zip если есть' {
+            # маркер state.db
+            Set-Content -Path (Join-Path $script:TestRoot 'data\state.db') -Value 'db' -Encoding ASCII
+            # маркер auth.json
+            Set-Content -Path (Join-Path $script:TestRoot 'data\auth.json') -Value '{}' -Encoding ASCII
+            # бэкап
+            $zip = New-HermesBackup -Quiet
+            # распаковка
+            $extract = Join-Path $script:TestRoot 'extract-state'
+            Expand-Archive -Path $zip -DestinationPath $extract -Force
+            # оба файла в config/
+            Test-Path (Join-Path $extract 'config\state.db') | Should -BeTrue
+            Test-Path (Join-Path $extract 'config\auth.json') | Should -BeTrue
+        }
+    }
+
+    # --- P0: Get-HermesBackups — Index 1 = newest ---
+    Context 'Get-HermesBackups (P0 newest-first)' {
+        It 'Index 1 = самый новый архив' {
+            # создаём три zip с разными LastWriteTime
+            $dir = Join-Path $script:TestRoot 'backups'
+            $old = Join-Path $dir 'backup-2020-01-01-000000.zip'
+            $mid = Join-Path $dir 'backup-2021-01-01-000000.zip'
+            $new = Join-Path $dir 'backup-2022-01-01-000000.zip'
+            # минимальный валидный zip через Compress-Archive
+            $tmpOld = Join-Path $script:TestRoot 't-old'
+            $tmpMid = Join-Path $script:TestRoot 't-mid'
+            $tmpNew = Join-Path $script:TestRoot 't-new'
+            New-Item -ItemType Directory -Path $tmpOld, $tmpMid, $tmpNew -Force | Out-Null
+            Set-Content (Join-Path $tmpOld 'a.txt') 'old' -Encoding ASCII
+            Set-Content (Join-Path $tmpMid 'a.txt') 'mid' -Encoding ASCII
+            Set-Content (Join-Path $tmpNew 'a.txt') 'new' -Encoding ASCII
+            Compress-Archive -Path (Join-Path $tmpOld '*') -DestinationPath $old -Force
+            Compress-Archive -Path (Join-Path $tmpMid '*') -DestinationPath $mid -Force
+            Compress-Archive -Path (Join-Path $tmpNew '*') -DestinationPath $new -Force
+            # выставляем время явно (Name-сортировка ascending дала бы old первым)
+            (Get-Item $old).LastWriteTime = (Get-Date).AddDays(-3)
+            (Get-Item $mid).LastWriteTime = (Get-Date).AddDays(-2)
+            (Get-Item $new).LastWriteTime = (Get-Date).AddDays(-1)
+            # список
+            $list = Get-HermesBackups
+            # минимум 3
+            $list.Count | Should -BeGreaterOrEqual 3
+            # Index 1 (первый элемент) = newest
+            $list[0].Name | Should -Be 'backup-2022-01-01-000000.zip'
+        }
     }
 
     # --- Ensure-HermesDataDirs ---

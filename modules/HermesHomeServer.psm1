@@ -325,9 +325,18 @@ function Ensure-Hermes {
 }
 
 function Test-HermesHealthy {
-    # Проверяет healthcheck контейнера
-    $status = docker inspect --format '{{.State.Health.Status}}' hermes-home 2>$null
-    if ($status -eq 'healthy') { return $true }
+    # P1: healthy только при Health=healthy; без Health — тогда Running
+    # контейнер отсутствует — сразу False
+    docker inspect hermes-home *> $null
+    if ($LASTEXITCODE -ne 0) { return $false }
+
+    # статус healthcheck; пусто = секция Health не настроена
+    $status = docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' hermes-home 2>$null
+    # если Health есть — только 'healthy' считается OK (не Running как silent OK)
+    if ($status -and $status.Trim()) {
+        return ($status.Trim() -eq 'healthy')
+    }
+    # Health нет — fallback на Running
     $running = docker inspect --format '{{.State.Running}}' hermes-home 2>$null
     return ($running -eq 'true')
 }
@@ -367,7 +376,19 @@ function Get-HermesStatus {
         }
     }
 
-    $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'" -ErrorAction SilentlyContinue
+    # P2: свободное место по диску корня проекта, не хардкод C:
+    $driveLetter = $null
+    try {
+        # буква диска из пути проекта (например D для D:\hhs)
+        $driveLetter = (Get-Item -LiteralPath $root).PSDrive.Name
+    }
+    catch {
+        $driveLetter = $null
+    }
+    # запасной вариант — C
+    if (-not $driveLetter) { $driveLetter = 'C' }
+    # запрос Win32 по DeviceID вида 'D:'
+    $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$($driveLetter):'" -ErrorAction SilentlyContinue
     $diskFree = if ($disk) { [math]::Round($disk.FreeSpace / 1GB) } else { 0 }
 
     $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
@@ -455,7 +476,7 @@ function New-HermesBackup {
     & $copyDataDir 'skills' 'skills'
     & $copyDataDir 'cron' 'cron'
 
-    # config/ — .env, config.yaml, SOUL.md
+    # config/ — .env, config.yaml, SOUL.md, state.db*, auth.json
     $configDest = Join-Path $tempDir 'config'
     New-Item -ItemType Directory -Path $configDest -Force | Out-Null
     foreach ($file in @(
@@ -465,6 +486,13 @@ function New-HermesBackup {
     )) {
         if (Test-Path $file.Src) {
             Copy-Item $file.Src (Join-Path $configDest $file.Name) -Force
+        }
+    }
+    # P1: state.db* и auth.json (если есть в data/)
+    foreach ($name in @('state.db', 'state.db-wal', 'state.db-shm', 'auth.json')) {
+        $srcState = Join-Path $root "data\$name"
+        if (Test-Path -LiteralPath $srcState) {
+            Copy-Item -LiteralPath $srcState -Destination (Join-Path $configDest $name) -Force
         }
     }
 
@@ -478,8 +506,23 @@ function New-HermesBackup {
     if ($backupPassword -and (Test-Path $plainEnv)) {
         $openssl = Get-Command openssl -ErrorAction SilentlyContinue
         if ($openssl) {
-            # openssl AES-256-CBC + PBKDF2 (как в backup.sh)
-            & openssl enc -aes-256-cbc -salt -pbkdf2 -in $plainEnv -out $encEnv -pass "pass:$backupPassword" 2>$null
+            # P2: пароль через файл (-pass file:), не pass: в cmdline
+            $passFile = Join-Path $env:TEMP ("hermes-openssl-pass-" + [guid]::NewGuid().ToString('N') + '.txt')
+            try {
+                # пишем пароль во временный файл
+                [System.IO.File]::WriteAllText($passFile, $backupPassword)
+                # ограничиваем ACL текущим пользователем (best-effort)
+                try {
+                    icacls $passFile /inheritance:r /grant:r "${env:USERNAME}:(R)" 2>$null | Out-Null
+                }
+                catch { }
+                # openssl AES-256-CBC + PBKDF2 (как в backup.sh)
+                & openssl enc -aes-256-cbc -salt -pbkdf2 -in $plainEnv -out $encEnv -pass "file:$passFile" 2>$null
+            }
+            finally {
+                # сразу удаляем файл с паролем
+                Remove-Item -LiteralPath $passFile -Force -ErrorAction SilentlyContinue
+            }
             if (Test-Path $encEnv) {
                 Remove-Item $plainEnv -Force                      # открытый .env в архив не кладём
             }
@@ -494,10 +537,10 @@ function New-HermesBackup {
     Compress-Archive -Path (Join-Path $tempDir '*') -DestinationPath $zipPath -Force
     Remove-Item $tempDir -Recurse -Force
 
-    # ротация: хранить последние N копий
+    # ротация: хранить последние N копий (новые сверху, как ls -1t)
     $retention = 30
     if ($envMap['BACKUP_RETENTION'] -match '^\d+$') { $retention = [int]$envMap['BACKUP_RETENTION'] }
-    $allBackups = Get-ChildItem $backupDir -Filter 'backup-*.zip' | Sort-Object Name -Descending
+    $allBackups = Get-ChildItem $backupDir -Filter 'backup-*.zip' | Sort-Object LastWriteTime -Descending
     if ($allBackups.Count -gt $retention) {
         $allBackups | Select-Object -Skip $retention | Remove-Item -Force
     }
@@ -516,11 +559,12 @@ function New-HermesBackup {
 }
 
 function Get-HermesBackups {
-    # Список доступных архивов
+    # P0: список архивов, новые сверху (как ls -1t); Index 1 = самый новый
     $root = Get-HermesProjectRoot
     $backupDir = Join-Path $root 'backups'
     if (-not (Test-Path $backupDir)) { return @() }
-    return Get-ChildItem $backupDir -Filter 'backup-*.zip' | Sort-Object Name
+    # @() — всегда массив, даже если файл один
+    return @(Get-ChildItem $backupDir -Filter 'backup-*.zip' | Sort-Object LastWriteTime -Descending)
 }
 
 function Restore-HermesBackup {
@@ -585,6 +629,13 @@ function Restore-HermesBackup {
     if (Test-Path (Join-Path $tempDir 'config\SOUL.md')) {
         Copy-Item (Join-Path $tempDir 'config\SOUL.md') (Join-Path $root 'data\SOUL.md') -Force
     }
+    # P1: восстанавливаем state.db* и auth.json в data/, если были в архиве
+    foreach ($name in @('state.db', 'state.db-wal', 'state.db-shm', 'auth.json')) {
+        $srcState = Join-Path $tempDir "config\$name"
+        if (Test-Path -LiteralPath $srcState) {
+            Copy-Item -LiteralPath $srcState -Destination (Join-Path $root "data\$name") -Force
+        }
+    }
 
     # текущий пароль шифрования (из живого .env, до перезаписи)
     $currentEnv = Get-HermesEnv
@@ -596,7 +647,19 @@ function Restore-HermesBackup {
     if ((Test-Path $encBackup) -and $backupPassword) {
         $openssl = Get-Command openssl -ErrorAction SilentlyContinue
         if ($openssl) {
-            & openssl enc -d -aes-256-cbc -pbkdf2 -in $encBackup -out $envBackup -pass "pass:$backupPassword" 2>$null
+            # P2: пароль через файл, не pass: в cmdline
+            $passFile = Join-Path $env:TEMP ("hermes-openssl-pass-" + [guid]::NewGuid().ToString('N') + '.txt')
+            try {
+                [System.IO.File]::WriteAllText($passFile, $backupPassword)
+                try {
+                    icacls $passFile /inheritance:r /grant:r "${env:USERNAME}:(R)" 2>$null | Out-Null
+                }
+                catch { }
+                & openssl enc -d -aes-256-cbc -pbkdf2 -in $encBackup -out $envBackup -pass "file:$passFile" 2>$null
+            }
+            finally {
+                Remove-Item -LiteralPath $passFile -Force -ErrorAction SilentlyContinue
+            }
         }
         else {
             Write-Host 'Skip .env.enc: openssl не найден, секретный .env не восстановлен.'
@@ -781,6 +844,37 @@ function Remove-WatchdogSchedule {
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
 }
 
+function Ensure-ModelCheckSchedule {
+    param([switch]$Quiet)
+
+    # P1: еженедельная задача — check-models.ps1 (воскресенье 04:00)
+    $root = Get-HermesProjectRoot
+    $taskName = 'HermesHomeServer-ModelCheck'
+    $scriptPath = Join-Path $root 'check-models.ps1'
+
+    # действие: powershell -File check-models.ps1
+    $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`""
+    # триггер: раз в неделю
+    $trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At '04:00'
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+
+    # пересоздаём задачу, если уже была
+    $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    if ($existing) {
+        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+    }
+
+    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Description 'Hermes Home Server weekly model check' | Out-Null
+
+    if (-not $Quiet) { Write-HermesStep -Name 'ModelCheck' -Status 'OK' -Detail 'weekly Sun 04:00' }
+}
+
+function Remove-ModelCheckSchedule {
+    # снимаем задачу ModelCheck при uninstall
+    $taskName = 'HermesHomeServer-ModelCheck'
+    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+}
+
 function Update-Hermes {
     param([switch]$Quiet)
 
@@ -873,6 +967,8 @@ function Uninstall-HermesHome {
     $root = Get-HermesProjectRoot
     Remove-BackupSchedule
     Remove-WatchdogSchedule
+    # P1: снимаем еженедельную проверку моделей
+    Remove-ModelCheckSchedule
 
     Push-Location $root
     docker compose down -v 2>&1 | Out-Null

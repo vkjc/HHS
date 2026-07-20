@@ -17,3 +17,5 @@ if [ "$n" -eq 0 ]; then
 fi
 
 echo "Restore: /restore1 (newest), /restore2, /restore3 ..."
+# P0: секреты этим путём не восстанавливаются
+echo "NOTE: Telegram restore does NOT restore .env/secrets — use restore.ps1 on the Windows host."

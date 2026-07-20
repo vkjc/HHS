@@ -56,6 +56,13 @@ for f in config.yaml SOUL.md; do
   fi
 done
 
+# P1: state.db* и auth.json (если есть)
+for f in state.db state.db-wal state.db-shm auth.json; do
+  if [ -f "/opt/data/$f" ]; then
+    cp -f "/opt/data/$f" "$TMP/config/" 2>/dev/null || true
+  fi
+done
+
 # ФИКС: секреты не лежат в /opt/data/.env —
 # они приходят как переменные окружения из корневого .env (env_file).
 # Собираем полный .env для архива из окружения контейнера.
@@ -74,8 +81,16 @@ done
 
 # П12: если задан BACKUP_PASSWORD — шифруем .env перед упаковкой
 if [ -n "$BACKUP_PASSWORD" ] && [ -f "$ENV_OUT" ]; then
+  # P2: пароль через файл (-pass file:), не pass: в cmdline
+  PASSFILE=$(mktemp)
+  # права только владельцу
+  chmod 600 "$PASSFILE"
+  # пишем пароль без лишнего перевода строки в конце — printf
+  printf '%s' "$BACKUP_PASSWORD" > "$PASSFILE"
   # шифруем openssl AES-256-CBC, результат — .env.enc
-  openssl enc -aes-256-cbc -salt -pbkdf2 -in "$ENV_OUT" -out "$TMP/config/.env.enc" -pass "pass:$BACKUP_PASSWORD" 2>/dev/null
+  openssl enc -aes-256-cbc -salt -pbkdf2 -in "$ENV_OUT" -out "$TMP/config/.env.enc" -pass "file:$PASSFILE" 2>/dev/null
+  # сразу удаляем файл с паролем
+  rm -f "$PASSFILE"
   # если шифрование удалось — убираем открытый .env из архива
   if [ -f "$TMP/config/.env.enc" ]; then
     rm -f "$ENV_OUT"
@@ -135,3 +150,12 @@ for old in $(ls -1t "$BACKUP_DIR"/backup-*.zip 2>/dev/null); do
     rm -f "$old"
   fi
 done
+
+# P1: зеркало — копируем zip, если BACKUP_MIRROR_DIR задан и директория доступна из контейнера
+if [ -n "$BACKUP_MIRROR_DIR" ]; then
+  if [ -d "$BACKUP_MIRROR_DIR" ]; then
+    cp -f "$ARCHIVE" "$BACKUP_MIRROR_DIR/" 2>/dev/null && echo "Mirrored to $BACKUP_MIRROR_DIR" || echo "Mirror copy failed: $BACKUP_MIRROR_DIR"
+  else
+    echo "BACKUP_MIRROR_DIR set but not accessible in container ($BACKUP_MIRROR_DIR) — skip mirror (use host New-HermesBackup for Windows paths)."
+  fi
+fi
