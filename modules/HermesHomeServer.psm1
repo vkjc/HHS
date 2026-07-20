@@ -443,8 +443,17 @@ function Restore-HermesBackup {
     if (Test-Path (Join-Path $tempDir 'config\config.yaml')) {
         Copy-Item (Join-Path $tempDir 'config\config.yaml') (Join-Path $root 'data\config.yaml') -Force
     }
-    if (Test-Path (Join-Path $tempDir 'config\.env')) {
-        Copy-Item (Join-Path $tempDir 'config\.env') (Join-Path $root '.env') -Force
+    # ФИКС: восстанавливаем .env только если в бэкапе он полный (содержит бот-токен).
+    # Иначе старый неполный .env из контейнера затёр бы рабочие секреты.
+    $envBackup = Join-Path $tempDir 'config\.env'                      # путь к .env внутри распакованного бэкапа
+    if (Test-Path $envBackup) {                                        # если .env в бэкапе вообще есть
+        $envText = Get-Content $envBackup -Raw                         # читаем его содержимое целиком
+        if ($envText -match '(?m)^TELEGRAM_BOT_TOKEN=.+') {            # проверяем: токен заполнен (не пустой)
+            Copy-Item $envBackup (Join-Path $root '.env') -Force       # полный файл — можно восстанавливать
+        }
+        else {                                                         # токена нет — файл неполный
+            Write-Host 'Skip .env restore: backup has no secrets (keeping current .env).'
+        }
     }
 
     Remove-Item $tempDir -Recurse -Force

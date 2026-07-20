@@ -24,10 +24,26 @@ mkdir -p "$TMP/memory" "$TMP/config" "$TMP/logs"
 copy_files /opt/data/memories "$TMP/memory"
 copy_files /opt/data/logs "$TMP/logs"
 
-for f in config.yaml .env SOUL.md; do
+# Копируем конфиги из /opt/data в архив (config.yaml и SOUL.md)
+for f in config.yaml SOUL.md; do
   if [ -f "/opt/data/$f" ]; then
     cp -f "/opt/data/$f" "$TMP/config/" 2>/dev/null || true
   fi
+done
+
+# ФИКС: секреты (токены, ключи) не лежат в /opt/data/.env —
+# они приходят в контейнер как переменные окружения из корневого .env (env_file).
+# Поэтому собираем полный .env для архива из окружения контейнера.
+ENV_OUT="$TMP/config/.env"          # путь к .env внутри архива
+: > "$ENV_OUT"                      # создаём пустой файл
+# перечисляем все ключи, которые нужно сохранить в бэкап
+for key in TELEGRAM_BOT_TOKEN TELEGRAM_ALLOWED_USERS OPENAI_BASE_URL OPENAI_API_KEY \
+           HERMES_MODEL HERMES_PROVIDER_NAME BACKUP_RETENTION \
+           TELEGRAM_HOME_CHANNEL TELEGRAM_HOME_CHANNEL_THREAD_ID; do
+  # читаем значение переменной окружения по имени
+  val=$(printenv "$key")
+  # пишем строку KEY=value в файл, даже если значение пустое
+  echo "$key=$val" >> "$ENV_OUT"
 done
 
 mkdir -p "$BACKUP_DIR"

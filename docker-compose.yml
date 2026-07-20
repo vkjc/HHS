@@ -21,7 +21,9 @@ services:
           memory: 4G
           cpus: "2.0"
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8642/health || exit 1"]
+      # ФИКС: в образе нет wget, а порт 8642 не слушается —
+      # поэтому проверяем просто, что процесс gateway жив
+      test: ["CMD-SHELL", "pgrep -f 'hermes gateway' > /dev/null || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
