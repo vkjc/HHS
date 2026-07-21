@@ -242,6 +242,11 @@ tool_loop_guardrails:
 terminal:
   backend: local
 
+# Speech-to-text: голос → текст через Groq Whisper (нужен GROQ_API_KEY)
+stt:
+  enabled: true
+  provider: groq
+
 quick_commands:
   bkp:
     type: exec

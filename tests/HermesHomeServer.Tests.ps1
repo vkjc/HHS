@@ -155,6 +155,9 @@ Describe 'HermesHomeServer module' {
             # wiki quick commands
             $raw | Should -Match 'wikistatus:'
             $raw | Should -Match 'wikisearch:'
+            # STT через Groq Whisper
+            $raw | Should -Match '(?m)^stt:'
+            $raw | Should -Match 'provider: groq'
             # fallback OpenRouter (П1)
             $raw | Should -Match 'custom_providers:'
             # без BOM

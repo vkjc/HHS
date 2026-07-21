@@ -25,6 +25,12 @@
 
 **Локально хранится:** память Hermes, конфиги, логи, архивы бэкапов. Локальных моделей нет.
 
+### Голос (STT / TTS)
+
+- **STT (голос → текст):** `stt.provider: groq` в `data/config.yaml` — облачный Groq Whisper (`whisper-large-v3-turbo` по умолчанию). Нужен `GROQ_API_KEY` в `.env` (https://console.groq.com/keys). Без локального faster-whisper.
+- **TTS (текст → голос):** Edge TTS по умолчанию (бесплатно, без ключа).
+- Проверка: отправить голосовое сообщение боту в Telegram; в логах ожидать `Transcribed ... via Groq API`.
+
 ---
 
 ## Архитектура
@@ -255,6 +261,7 @@ hermes cron create "0 10 * * 0" --name wiki-lint --skill wiki-llm --deliver orig
 | `TELEGRAM_ALLOWED_USERS` | ID пользователя(ей) |
 | `OPENAI_BASE_URL` / `OPENAI_API_KEY` | Провайдер |
 | `HERMES_MODEL` / `HERMES_PROVIDER_NAME` | Модель и имя для status |
+| `GROQ_API_KEY` | Groq Whisper STT (голос → текст); ключ: https://console.groq.com/keys |
 | `BACKUP_RETENTION` | Сколько zip хранить |
 | `BACKUP_PASSWORD` | Шифрование `.env` в архиве (опционально) |
 | `BACKUP_MIRROR_DIR` | Копия zip на другой диск / OneDrive (опционально) |
